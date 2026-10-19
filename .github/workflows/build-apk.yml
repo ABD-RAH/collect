@@ -16,6 +16,8 @@ jobs:
           java-version: '17'
 
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Apply the progress bar patch
         run: git apply --verbose progress_bar.patch
