@@ -1,0 +1,32 @@
+name: Build debug APK
+
+# Runs only when you press "Run workflow" on the Actions tab.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Apply the progress bar patch
+        run: git apply --verbose progress_bar.patch
+
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Save the APK so it can be downloaded
+        uses: actions/upload-artifact@v4
+        with:
+          name: collect-progress-apk
+          path: collect_app/build/outputs/apk/debug/*.apk
