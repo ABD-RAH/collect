@@ -1,0 +1,784 @@
+diff --git a/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java b/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java
+index 4515913..91dec50 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java
++++ b/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java
+@@ -1078,6 +1078,7 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+ 
+                     odkView = createODKView(advancingPage, prompts, groups);
+                     odkView.setWidgetValueChangedListener(this);
++                    org.odk.collect.android.formentry.RosterTable.addTo(odkView, formController);
+                     Timber.i("Created view for group %s %s",
+                             groups.length > 0 ? groups[groups.length - 1].getLongText() : "[top]",
+                             prompts.length > 0 ? prompts[0].getQuestionText() : "[no question]");
+@@ -1100,6 +1101,8 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+                     updateNavigationButtonVisibility();
+                 }
+ 
++                updateProgressIndicator(formController);
++
+                 return odkView;
+ 
+             case EVENT_PROMPT_NEW_REPEAT:
+@@ -1120,6 +1123,40 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+         }
+     }
+ 
++    private void updateProgressIndicator(FormController formController) {
++        org.odk.collect.android.formentry.StageProgress.State state =
++                org.odk.collect.android.formentry.StageProgress.calculate(formController);
++        if (state == null) {
++            return;
++        }
++        android.widget.LinearLayout holder = findViewById(R.id.form_progress_holder);
++        String title = formController.getFormTitle();
++        org.odk.collect.android.formentry.StageHeader.render(
++                holder,
++                title != null ? title : "",
++                state,
++                target -> {
++                    jumpBackToStage(target);
++                    return kotlin.Unit.INSTANCE;
++                });
++    }
++
++    /**
++     * Saves the answers on the current screen, then goes to the first screen of an earlier stage.
++     * Only used for going backwards (the header offers no forward jump).
++     */
++    private void jumpBackToStage(FormIndex target) {
++        FormController formController = getFormController();
++        if (formController == null || odkView == null || !allowMovingBackwards) {
++            return;
++        }
++        if (!formEntryViewModel.updateAnswersForScreen(getAnswers(), false)) {
++            return;
++        }
++        formController.jumpToIndex(target);
++        formEntryViewModel.refresh();
++    }
++
+     @NotNull
+     private ODKView createODKView(boolean advancingPage, FormEntryPrompt[] prompts, FormEntryCaption[] groups) {
+         odkViewLifecycle = new ControllableLifecyleOwner();
+diff --git a/collect_app/src/main/java/org/odk/collect/android/application/Collect.java b/collect_app/src/main/java/org/odk/collect/android/application/Collect.java
+index 78ba283..68a1ab2 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/application/Collect.java
++++ b/collect_app/src/main/java/org/odk/collect/android/application/Collect.java
+@@ -132,6 +132,7 @@ public class Collect extends Application implements
+     public void onCreate() {
+         super.onCreate();
+         singleton = this;
++        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO);
+ 
+         CrashHandler.install(this).launchApp(
+                 () -> ExternalFilesUtils.testExternalFilesAccess(this),
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java b/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java
+index 5baca83..f2f488a 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java
+@@ -201,6 +201,9 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+ 
+         layout = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                 LinearLayout.LayoutParams.WRAP_CONTENT);
++        // each question sits in its own rounded tile
++        float tileDensity = context.getResources().getDisplayMetrics().density;
++        layout.setMargins((int) (12 * tileDensity), (int) (6 * tileDensity), (int) (12 * tileDensity), (int) (6 * tileDensity));
+         // display which group you are in as well as the question
+         setGroupText(groups);
+ 
+@@ -384,6 +387,7 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+         QuestionWidget qw = widgetFactory.createWidgetFromPrompt(question, permissionsProvider, forceReadOnly);
+         qw.setOnLongClickListener(this);
+         qw.setValueChangedListener(this);
++        qw.setBackgroundResource(R.drawable.question_tile);
+ 
+         return qw;
+     }
+@@ -400,6 +404,8 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+         int marginVertical = (int) getContext().getResources().getDimension(org.odk.collect.androidshared.R.dimen.margin_extra_small);
+         params.setMargins(0, marginVertical, 0, marginVertical);
+         divider.setLayoutParams(params);
++        // tiles replace the divider lines
++        divider.setVisibility(View.GONE);
+ 
+         return divider;
+     }
+@@ -701,6 +707,14 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+         return widgets;
+     }
+ 
++    /**
++     * Adds a custom view (for example a table) to the end of this screen.
++     */
++    public void addExtraView(View view) {
++        widgetsList.addView(view, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
++    }
++
+     @Override
+     public void setOnFocusChangeListener(OnFocusChangeListener l) {
+         for (int i = 0; i < widgets.size(); i++) {
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/RosterTable.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/RosterTable.kt
+new file mode 100644
+index 0000000..49aeff0
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/RosterTable.kt
+@@ -0,0 +1,194 @@
++package org.odk.collect.android.formentry
++
++import android.content.Context
++import android.graphics.Typeface
++import android.view.Gravity
++import android.view.View
++import android.view.ViewGroup
++import android.widget.LinearLayout
++import android.widget.TableLayout
++import android.widget.TableRow
++import android.widget.TextView
++import com.google.android.material.color.MaterialColors
++import org.javarosa.core.model.instance.TreeElement
++import org.odk.collect.android.javarosawrapper.FormController
++
++/**
++ * Shows the family list screen of the community survey as a real table
++ * (Name | Age | Services) instead of the text list built by the form.
++ *
++ * It only acts on the screen whose group is called "roster_summary_group" below, so every other
++ * form and every other screen is untouched. If anything goes wrong or no members are found,
++ * nothing changes and the form's own text list stays visible.
++ */
++object RosterTable {
++    private const val GROUP_NAME = "roster_summary_grp"
++    private const val NOTE_NAME = "roster_summary_note"
++    private const val REPEAT_NAME = "family_members"
++
++    private data class Person(val name: String, val age: String, val services: String)
++
++    @JvmStatic
++    fun addTo(odkView: ODKView, formController: FormController) {
++        try {
++            val reference = formController.getFormIndex().reference
++            if (reference?.nameLast != GROUP_NAME) {
++                return
++            }
++
++            val root = formController.getFormDef()?.mainInstance?.root ?: return
++            val people = readPeople(root)
++            if (people.isEmpty()) {
++                return
++            }
++
++            // Hide the form's own text list; the table replaces it.
++            for (widget in odkView.widgets) {
++                if (widget.formEntryPrompt.index.reference.nameLast == NOTE_NAME) {
++                    widget.visibility = View.GONE
++                }
++            }
++
++            val language = formController.getLanguage().orEmpty()
++            val malayalam = language.contains("Malayalam", ignoreCase = true) || language == "ml"
++            odkView.addExtraView(buildView(odkView.context, people, malayalam))
++        } catch (e: RuntimeException) {
++            // Never let the table break the form: fall back to the text list.
++        }
++    }
++
++    /** The member names entered so far, in order (blank if not entered yet). */
++    @JvmStatic
++    fun memberNames(formController: FormController): List<String> {
++        return try {
++            val root = formController.getFormDef()?.mainInstance?.root ?: return emptyList()
++            readPeople(root).map { it.name }
++        } catch (e: RuntimeException) {
++            emptyList()
++        }
++    }
++
++    private fun readPeople(root: TreeElement): List<Person> {
++        val instances = mutableListOf<TreeElement>()
++        findRepeats(root, instances)
++        return instances.map { member ->
++            val name = textOf(findChild(member, "member_name"))
++            val age = textOf(findChild(member, "member_age"))
++            val overview = textOf(findChild(member, "health_overview"))
++            Person(name, age, services(overview, age.toIntOrNull()))
++        }
++    }
++
++    private fun findRepeats(element: TreeElement, out: MutableList<TreeElement>) {
++        for (i in 0 until element.numChildren) {
++            val child = element.getChildAt(i)
++            if (child.name == REPEAT_NAME) {
++                if (child.multiplicity >= 0) {
++                    out.add(child)
++                }
++            } else {
++                findRepeats(child, out)
++            }
++        }
++    }
++
++    private fun findChild(element: TreeElement, name: String): TreeElement? {
++        for (i in 0 until element.numChildren) {
++            val child = element.getChildAt(i)
++            if (child.name == name) {
++                return child
++            }
++            val deeper = findChild(child, name)
++            if (deeper != null) {
++                return deeper
++            }
++        }
++        return null
++    }
++
++    private fun textOf(element: TreeElement?): String {
++        return element?.value?.displayText?.trim() ?: ""
++    }
++
++    private fun services(overview: String, age: Int?): String {
++        val chosen = overview.split(Regex("[,\\s]+")).filter { it.isNotEmpty() }
++        val labels = mutableListOf<String>()
++        if ("ncd" in chosen && (age == null || age >= 18)) labels.add("NCD")
++        if ("disability" in chosen) labels.add("Disability")
++        if ("mental_health" in chosen) labels.add("Mental health")
++        if ("palliative" in chosen) labels.add("Palliative")
++        if (age != null && age >= 60) labels.add("Geriatric")
++        return if (labels.isEmpty()) "-" else labels.joinToString(", ")
++    }
++
++    private fun buildView(context: Context, people: List<Person>, malayalam: Boolean): View {
++        val density = context.resources.displayMetrics.density
++        fun dp(value: Int) = (value * density).toInt()
++
++        val textColor = MaterialColors.getColor(context, com.google.android.material.R.attr.colorOnSurface, 0xFF000000.toInt())
++        val headerBackground = MaterialColors.getColor(context, com.google.android.material.R.attr.colorSurfaceVariant, 0xFFE0E0E0.toInt())
++        val lineColor = MaterialColors.getColor(context, com.google.android.material.R.attr.colorOutlineVariant, 0xFFBDBDBD.toInt())
++
++        val headers = if (malayalam) {
++            listOf("പേര്", "പ്രായം", "സേവനങ്ങൾ")
++        } else {
++            listOf("Name", "Age", "Services")
++        }
++        val intro = if (malayalam) {
++            "കുടുംബാംഗങ്ങളുടെ പട്ടിക പരിശോധിക്കുക. എന്തെങ്കിലും തെറ്റുണ്ടെങ്കിൽ തിരികെ പോകുക."
++        } else {
++            "Please check the family list. Go back if anything is wrong."
++        }
++        val weights = floatArrayOf(2f, 1f, 3f)
++
++        fun cell(text: String, column: Int, bold: Boolean, background: Int?): TextView {
++            return TextView(context).apply {
++                this.text = text
++                setTextColor(textColor)
++                textSize = 15f
++                if (bold) setTypeface(typeface, Typeface.BOLD)
++                gravity = Gravity.CENTER_VERTICAL
++                setPadding(dp(10), dp(12), dp(10), dp(12))
++                if (background != null) setBackgroundColor(background)
++                layoutParams = TableRow.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weights[column])
++            }
++        }
++
++        fun row(values: List<String>, bold: Boolean, background: Int?): TableRow {
++            return TableRow(context).apply {
++                layoutParams = TableLayout.LayoutParams(
++                    ViewGroup.LayoutParams.MATCH_PARENT,
++                    ViewGroup.LayoutParams.WRAP_CONTENT
++                )
++                values.forEachIndexed { column, value -> addView(cell(value, column, bold, background)) }
++            }
++        }
++
++        fun divider(): View {
++            return View(context).apply {
++                setBackgroundColor(lineColor)
++                layoutParams = TableLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
++            }
++        }
++
++        val table = TableLayout(context).apply {
++            addView(row(headers, true, headerBackground))
++            people.forEach { person ->
++                addView(row(listOf(person.name, person.age, person.services), false, null))
++                addView(divider())
++            }
++        }
++
++        return LinearLayout(context).apply {
++            orientation = LinearLayout.VERTICAL
++            setPadding(dp(16), dp(8), dp(16), dp(16))
++            addView(TextView(context).apply {
++                text = intro
++                setTextColor(textColor)
++                textSize = 16f
++                setPadding(0, 0, 0, dp(12))
++            })
++            addView(table)
++        }
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/StageHeader.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/StageHeader.kt
+new file mode 100644
+index 0000000..0b26a0d
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/StageHeader.kt
+@@ -0,0 +1,176 @@
++package org.odk.collect.android.formentry
++
++import android.content.Context
++import android.graphics.Color
++import android.graphics.Typeface
++import android.graphics.drawable.GradientDrawable
++import android.view.Gravity
++import android.view.View
++import android.widget.FrameLayout
++import android.widget.LinearLayout
++import android.widget.TextView
++import org.javarosa.core.model.FormIndex
++
++/**
++ * Draws the stage header at the top of the form screen: title and "Stage n of N", a row of
++ * equal-width segments (the current one filled in proportion to progress through that stage),
++ * and a row with "Previous: <stage>" (tappable), the current stage, and a dimmed "Next: <stage>".
++ * There is deliberately no way to go forward from here.
++ */
++object StageHeader {
++    private val INK = Color.parseColor("#123D1A")
++    private val MUTED = Color.parseColor("#2E6B35")
++    private val DEEP = Color.parseColor("#2E7D32")
++    private val PRIMARY = Color.parseColor("#E8F5E9")
++    private val SECONDARY = Color.parseColor("#A5D6A7")
++
++    @JvmStatic
++    fun render(holder: LinearLayout, title: String, state: StageProgress.State, onPrevious: (FormIndex) -> Unit) {
++        val context = holder.context
++        val density = context.resources.displayMetrics.density
++        fun dp(v: Int) = (v * density).toInt()
++
++        holder.removeAllViews()
++        holder.orientation = LinearLayout.VERTICAL
++        holder.setPadding(dp(20), dp(10), dp(20), dp(16))
++        holder.background = GradientDrawable().apply {
++            setColor(SECONDARY)
++            val r = dp(28).toFloat()
++            cornerRadii = floatArrayOf(0f, 0f, 0f, 0f, r, r, r, r)
++        }
++
++        val stages = state.stages
++        val index = state.current
++
++        // Row 1: title and "Stage n of N"
++        holder.addView(LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER_VERTICAL
++            addView(text(context, title, 15f, INK, true).apply {
++                maxLines = 1
++                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
++            })
++            addView(text(context, "Stage ${index + 1} of ${stages.size}", 13f, INK, true))
++        })
++
++        // Row 2: equal segments
++        holder.addView(LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            layoutParams = LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, dp(10)
++            ).apply { topMargin = dp(12) }
++            stages.forEachIndexed { i, stage ->
++                val fraction = when {
++                    i < index -> 1f
++                    i == index -> stage.fraction
++                    else -> 0f
++                }
++                addView(segment(context, fraction, dp(5)).apply {
++                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
++                        if (i > 0) marginStart = dp(4)
++                    }
++                })
++            }
++        })
++
++        // Row 3: previous / current / next
++        holder.addView(LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER_VERTICAL
++            layoutParams = LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
++            ).apply { topMargin = dp(12) }
++
++            val previous = stages.getOrNull(index - 1)
++            val next = stages.getOrNull(index + 1)
++
++            addView(pill(context, if (previous != null) "‹ Previous: ${previous.label}" else "", 12f, INK, false).apply {
++                layoutParams = LinearLayout.LayoutParams(0, dp(38), 1.3f)
++                if (previous == null) {
++                    visibility = View.INVISIBLE
++                } else {
++                    background = outline(dp(19).toFloat(), INK, dp(1) + 1, false, density)
++                    val target = previous.first
++                    if (target != null) {
++                        setOnClickListener { onPrevious(target) }
++                    } else {
++                        alpha = 0.5f
++                    }
++                }
++            })
++            addView(pill(context, stages[index].label, 15f, INK, true).apply {
++                layoutParams = LinearLayout.LayoutParams(0, dp(38), 0.9f).apply {
++                    marginStart = dp(6)
++                    marginEnd = dp(6)
++                }
++                background = GradientDrawable().apply {
++                    setColor(PRIMARY)
++                    cornerRadius = dp(19).toFloat()
++                }
++            })
++            addView(pill(context, if (next != null) "Next: ${next.label}" else "", 12f, MUTED, false).apply {
++                layoutParams = LinearLayout.LayoutParams(0, dp(38), 1.3f)
++                gravity = Gravity.CENTER_VERTICAL or Gravity.END
++                if (next == null) {
++                    visibility = View.INVISIBLE
++                } else {
++                    background = outline(dp(19).toFloat(), MUTED, dp(1) + 1, true, density)
++                    isClickable = false
++                }
++            })
++        })
++    }
++
++    private fun text(context: Context, value: String, size: Float, color: Int, bold: Boolean): TextView {
++        return TextView(context).apply {
++            text = value
++            textSize = size
++            setTextColor(color)
++            if (bold) setTypeface(typeface, Typeface.BOLD)
++        }
++    }
++
++    private fun pill(context: Context, value: String, size: Float, color: Int, bold: Boolean): TextView {
++        val density = context.resources.displayMetrics.density
++        return text(context, value, size, color, bold).apply {
++            gravity = Gravity.CENTER
++            maxLines = 1
++            ellipsize = android.text.TextUtils.TruncateAt.END
++            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
++        }
++    }
++
++    private fun outline(radius: Float, color: Int, widthPx: Int, dashed: Boolean, density: Float): GradientDrawable {
++        return GradientDrawable().apply {
++            cornerRadius = radius
++            setColor(Color.TRANSPARENT)
++            if (dashed) setStroke(widthPx, color, 6f * density, 4f * density) else setStroke(widthPx, color)
++        }
++    }
++
++    private fun segment(context: Context, fraction: Float, radiusPx: Int): View {
++        val track = FrameLayout(context)
++        track.background = GradientDrawable().apply {
++            setColor(PRIMARY)
++            cornerRadius = radiusPx.toFloat()
++        }
++        track.clipToOutline = true
++        track.addView(View(context).apply {
++            background = GradientDrawable().apply {
++                setColor(DEEP)
++                cornerRadius = radiusPx.toFloat()
++            }
++            // Width is set once the segment has been measured.
++            visibility = if (fraction <= 0f) View.GONE else View.VISIBLE
++        }, FrameLayout.LayoutParams(0, FrameLayout.LayoutParams.MATCH_PARENT))
++        track.addOnLayoutChangeListener { v, left, _, right, _, _, _, _, _ ->
++            val fill = (v as FrameLayout).getChildAt(0)
++            val width = ((right - left) * fraction).toInt()
++            if (fill.layoutParams.width != width) {
++                fill.layoutParams.width = width
++                fill.requestLayout()
++            }
++        }
++        return track
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/StageProgress.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/StageProgress.kt
+new file mode 100644
+index 0000000..2f1a3be
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/StageProgress.kt
+@@ -0,0 +1,135 @@
++package org.odk.collect.android.formentry
++
++import org.javarosa.core.model.FormIndex
++import org.javarosa.form.api.FormEntryController
++import org.odk.collect.android.exception.JavaRosaException
++import org.odk.collect.android.javarosawrapper.FormController
++
++/**
++ * Works out which "stage" of the community survey the user is in, and how far through that stage.
++ *
++ * Stages, in order: Intro, Household details 1, one stage per family member (labelled with the
++ * name entered so far), Household details 2, Remarks.
++ *
++ * Which stage a screen belongs to is decided from the names of the groups it sits in (the same
++ * names as in the XLSForm). The form is walked from the start the same way the Next button does,
++ * so screens that are skipped (not relevant) are not counted. The current position is always put
++ * back before returning.
++ */
++object StageProgress {
++    data class Stage(
++        val label: String,
++        /** First screen of this stage, or null if the user has not reached it yet. */
++        val first: FormIndex?,
++        val total: Int,
++        /** Screens of this stage up to and including the current one (only for the current stage). */
++        val position: Int
++    ) {
++        val fraction: Float
++            get() = if (total <= 0) 0f else (position.toFloat() / total).coerceIn(0f, 1f)
++    }
++
++    data class State(val stages: List<Stage>, val current: Int)
++
++    private const val INTRO = "intro"
++    private const val HH1 = "hh1"
++    private const val HH2 = "hh2"
++    private const val REMARKS = "remarks"
++    private const val MEMBER_PREFIX = "m"
++
++    private class Acc {
++        var first: FormIndex? = null
++        var total = 0
++        var position = 0
++    }
++
++    private fun keyFor(formController: FormController, previous: String): String {
++        val reference = formController.getFormIndex().reference ?: return previous
++        var drilldown = -1
++        var key = previous
++        for (i in 0 until reference.size()) {
++            when (reference.getName(i)) {
++                "member_drilldown" -> drilldown = maxOf(reference.getMultiplicity(i), 0)
++                "consent_grp", "respondent_grp", "basic_details" -> key = INTRO
++                "sec1_top", "family_members", "roster_summary_grp" -> key = HH1
++                "sec1b" -> key = HH2
++                "sec6" -> key = REMARKS
++            }
++        }
++        return if (drilldown >= 0) MEMBER_PREFIX + drilldown else key
++    }
++
++    @JvmStatic
++    fun calculate(formController: FormController): State? {
++        val original: FormIndex = formController.getFormIndex()
++        return try {
++            val originalEvent = formController.getEvent()
++            formController.jumpToIndex(FormIndex.createBeginningOfFormIndex())
++
++            val accs = LinkedHashMap<String, Acc>()
++            var lastKey = INTRO
++            var currentKey: String? = null
++            var event = formController.stepToNextScreenEvent()
++            while (event != FormEntryController.EVENT_END_OF_FORM) {
++                if (event == FormEntryController.EVENT_QUESTION ||
++                    event == FormEntryController.EVENT_GROUP ||
++                    event == FormEntryController.EVENT_REPEAT
++                ) {
++                    val key = keyFor(formController, lastKey)
++                    lastKey = key
++                    val acc = accs.getOrPut(key) { Acc() }
++                    if (acc.first == null) acc.first = formController.getFormIndex()
++                    acc.total++
++                    if (currentKey == null && formController.getFormIndex() == original) {
++                        currentKey = key
++                        acc.position = acc.total
++                    }
++                }
++                event = formController.stepToNextScreenEvent()
++            }
++
++            if (originalEvent == FormEntryController.EVENT_END_OF_FORM) {
++                currentKey = lastKey
++                accs[lastKey]?.let { it.position = it.total }
++            }
++
++            val names = RosterTable.memberNames(formController)
++            val memberCount = accs.keys.count { it.startsWith(MEMBER_PREFIX) }
++
++            val keys = mutableListOf(INTRO, HH1)
++            val labels = mutableMapOf(
++                INTRO to "Intro", HH1 to "Household details 1",
++                HH2 to "Household details 2", REMARKS to "Remarks"
++            )
++            if (memberCount == 0) {
++                keys.add("m0")
++                labels["m0"] = "Members"
++            } else {
++                for (k in 0 until memberCount) {
++                    keys.add(MEMBER_PREFIX + k)
++                    labels[MEMBER_PREFIX + k] = names.getOrNull(k)?.takeIf { it.isNotBlank() } ?: "Member ${k + 1}"
++                }
++            }
++            keys.add(HH2)
++            keys.add(REMARKS)
++
++            val stages = keys.map { key ->
++                val acc = accs[key]
++                // Stages before the current one are complete; later ones are empty.
++                Stage(labels.getValue(key), acc?.first, acc?.total ?: 0, acc?.position ?: 0)
++            }
++            val current = keys.indexOf(currentKey ?: INTRO).coerceAtLeast(0)
++            // Earlier stages count as fully done.
++            val adjusted = stages.mapIndexed { i, s ->
++                if (i < current) s.copy(position = s.total) else s
++            }
++            State(adjusted, current)
++        } catch (e: JavaRosaException) {
++            null
++        } catch (e: RuntimeException) {
++            null
++        } finally {
++            formController.jumpToIndex(original)
++        }
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt
+index 2c3a0da..154c16a 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt
++++ b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt
+@@ -2,7 +2,7 @@ package org.odk.collect.android.mainmenu
+ 
+ import android.os.Build
+ import android.os.Bundle
+-import androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
++import androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+ import androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode
+ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+ import androidx.lifecycle.ViewModelProvider
+@@ -73,7 +73,7 @@ class MainMenuActivity : LocalizedActivity(), CollectComposeThemeProvider {
+         val viewModelProvider = ViewModelProvider(this, viewModelFactory)
+         currentProjectViewModel = viewModelProvider[CurrentProjectViewModel::class.java]
+ 
+-        setDefaultNightMode(MODE_NIGHT_FOLLOW_SYSTEM)
++        setDefaultNightMode(MODE_NIGHT_NO)
+ 
+         if (!currentProjectViewModel.hasCurrentProject()) {
+             super.onCreate(null)
+diff --git a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt
+index a8db476..1dd58e9 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt
++++ b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt
+@@ -56,9 +56,6 @@ class MainMenuViewModel(
+                 commitDescription =
+                     appendToCommitDescription(commitDescription, versionInformation.commitSHA!!)
+             }
+-            if (versionInformation.isDirty) {
+-                commitDescription = appendToCommitDescription(commitDescription, "dirty")
+-            }
+             return if (commitDescription.isNotEmpty()) {
+                 commitDescription
+             } else {
+diff --git a/collect_app/src/main/res/drawable/question_tile.xml b/collect_app/src/main/res/drawable/question_tile.xml
+new file mode 100644
+index 0000000..4881fa4
+--- /dev/null
++++ b/collect_app/src/main/res/drawable/question_tile.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="#FFFFFF" />
++    <stroke android:width="1dp" android:color="#DCEBDD" />
++    <corners android:radius="18dp" />
++</shape>
+diff --git a/collect_app/src/main/res/layout/form_entry.xml b/collect_app/src/main/res/layout/form_entry.xml
+index 5c8e38c..cee247d 100644
+--- a/collect_app/src/main/res/layout/form_entry.xml
++++ b/collect_app/src/main/res/layout/form_entry.xml
+@@ -22,13 +22,22 @@
+             app:layout_constraintEnd_toEndOf="parent"
+             app:layout_constraintTop_toTopOf="parent"/>
+ 
++        <LinearLayout
++            android:id="@+id/form_progress_holder"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:orientation="vertical"
++            app:layout_constraintStart_toStartOf="parent"
++            app:layout_constraintEnd_toEndOf="parent"
++            app:layout_constraintTop_toBottomOf="@id/audio_recording_controller" />
++
+         <FrameLayout
+             android:id="@+id/questionholder"
+             android:layout_width="0dp"
+             android:layout_height="0dp"
+             app:layout_constraintStart_toStartOf="parent"
+             app:layout_constraintEnd_toEndOf="parent"
+-            app:layout_constraintTop_toBottomOf="@id/audio_recording_controller"
++            app:layout_constraintTop_toBottomOf="@id/form_progress_holder"
+             app:layout_constraintBottom_toTopOf="@id/buttonholder"/>
+ 
+         <org.odk.collect.android.views.TransparentProgressScreen
+diff --git a/collect_app/src/main/res/values/colors.xml b/collect_app/src/main/res/values/colors.xml
+index caf43cb..0c96064 100644
+--- a/collect_app/src/main/res/values/colors.xml
++++ b/collect_app/src/main/res/values/colors.xml
+@@ -1,17 +1,17 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <color name="colorPrimaryLight">#3e9fcc</color>
++    <color name="colorPrimaryLight">#2E7D32</color>
+     <color name="colorOnPrimaryLight">#ffffff</color>
+-    <color name="colorPrimaryContainerLight">#bfe9ff</color>
+-    <color name="colorOnPrimaryContainerLight">#001f2a</color>
+-    <color name="colorSurfaceLight">#ffffff</color>
+-    <color name="colorOnSurfaceLight">#001f2a</color>
+-    <color name="colorSurfaceContainerHighestLight">#f2f2f2</color>
++    <color name="colorPrimaryContainerLight">#A5D6A7</color>
++    <color name="colorOnPrimaryContainerLight">#123D1A</color>
++    <color name="colorSurfaceLight">#E8F5E9</color>
++    <color name="colorOnSurfaceLight">#123D1A</color>
++    <color name="colorSurfaceContainerHighestLight">#DCEBDD</color>
+ 
+     <color name="colorPrimaryDark">#4cbcf0</color>
+     <color name="colorOnPrimaryDark">#003547</color>
+     <color name="colorPrimaryContainerDark">#004d65</color>
+-    <color name="colorOnPrimaryContainerDark">#bfe9ff</color>
++    <color name="colorOnPrimaryContainerDark">#A5D6A7</color>
+     <color name="colorSurfaceDark">#001117</color>
+     <color name="colorOnSurfaceDark">#d3e5ef</color>
+     <color name="colorSurfaceContainerHighestDark">#162f3b</color>
+diff --git a/collect_app/src/main/res/values/material_colors.xml b/collect_app/src/main/res/values/material_colors.xml
+index 05931ec..6809d4b 100644
+--- a/collect_app/src/main/res/values/material_colors.xml
++++ b/collect_app/src/main/res/values/material_colors.xml
+@@ -4,22 +4,22 @@
+     <color name="colorOnPrimary">@color/colorOnPrimaryLight</color>
+     <color name="colorPrimaryContainer">@color/colorPrimaryContainerLight</color>
+     <color name="colorOnPrimaryContainer">@color/colorOnPrimaryContainerLight</color>
+-    <color name="colorPrimaryInverse">#6dd2ff</color>
++    <color name="colorPrimaryInverse">#66BB6A</color>
+ 
+     <color name="colorError">#ba1a1a</color>
+     <!-- <color name="colorOnError">#ffffff</color> -->
+ 
+     <color name="colorSurface">@color/colorSurfaceLight</color>
+-    <color name="colorSurfaceVariant">#dce3e9</color>
++    <color name="colorSurfaceVariant">#CFE6D1</color>
+     <color name="colorOnSurface">@color/colorOnSurfaceLight</color>
+-    <color name="colorOnSurfaceVariant">#40484c</color>
++    <color name="colorOnSurfaceVariant">#2E6B35</color>
+     <color name="colorSurfaceContainerLowest">#ffffff</color>
+-    <color name="colorSurfaceContainerLow">#f7f7f7</color>
+-    <color name="colorSurfaceContainer">#f7f7f7</color>
+-    <color name="colorSurfaceContainerHigh">#f7f7f7</color>
++    <color name="colorSurfaceContainerLow">#F4FAF4</color>
++    <color name="colorSurfaceContainer">#F4FAF4</color>
++    <color name="colorSurfaceContainerHigh">#F4FAF4</color>
+     <color name="colorSurfaceContainerHighest">@color/colorSurfaceContainerHighestLight</color>
+-    <color name="colorSurfaceInverse">#003547</color>
+-    <color name="colorOnSurfaceInverse">#E1F4FF</color>
++    <color name="colorSurfaceInverse">#123D1A</color>
++    <color name="colorOnSurfaceInverse">#E8F5E9</color>
+ 
+     <bool name="lightStatusBar">true</bool>
+ </resources>
