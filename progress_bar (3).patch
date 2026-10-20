@@ -1,0 +1,1219 @@
+diff --git a/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java b/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java
+index 4515913..4dfb5e4 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java
++++ b/collect_app/src/main/java/org/odk/collect/android/activities/FormFillingActivity.java
+@@ -1078,6 +1078,8 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+ 
+                     odkView = createODKView(advancingPage, prompts, groups);
+                     odkView.setWidgetValueChangedListener(this);
++                    org.odk.collect.android.formentry.RosterTable.addTo(odkView, formController);
++                    org.odk.collect.android.formentry.ScreenStyle.centerMemberName(odkView);
+                     Timber.i("Created view for group %s %s",
+                             groups.length > 0 ? groups[groups.length - 1].getLongText() : "[top]",
+                             prompts.length > 0 ? prompts[0].getQuestionText() : "[no question]");
+@@ -1100,6 +1102,8 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+                     updateNavigationButtonVisibility();
+                 }
+ 
++                updateProgressIndicator(formController, currentSectionCaption(formController));
++
+                 return odkView;
+ 
+             case EVENT_PROMPT_NEW_REPEAT:
+@@ -1120,6 +1124,48 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+         }
+     }
+ 
++    private String currentSectionCaption(FormController formController) {
++        try {
++            FormEntryCaption[] groups = getGroupsForCurrentIndex(formController);
++            return groups.length > 0 ? groups[groups.length - 1].getLongText() : null;
++        } catch (RuntimeException e) {
++            return null;
++        }
++    }
++
++    private void updateProgressIndicator(FormController formController, String sectionCaption) {
++        org.odk.collect.android.formentry.StageProgress.State state =
++                org.odk.collect.android.formentry.StageProgress.calculate(formController);
++        if (state == null) {
++            return;
++        }
++        android.widget.LinearLayout holder = findViewById(R.id.form_progress_holder);
++        org.odk.collect.android.formentry.StageHeader.render(
++                holder,
++                org.odk.collect.android.formentry.StageProgress.headerTitle(state, sectionCaption),
++                state,
++                target -> {
++                    jumpBackToStage(target);
++                    return kotlin.Unit.INSTANCE;
++                });
++    }
++
++    /**
++     * Saves the answers on the current screen, then goes to the first screen of an earlier stage.
++     * Only used for going backwards (the header offers no forward jump).
++     */
++    private void jumpBackToStage(FormIndex target) {
++        FormController formController = getFormController();
++        if (formController == null || !allowMovingBackwards) {
++            return;
++        }
++        if (odkView != null && !formEntryViewModel.updateAnswersForScreen(getAnswers(), false)) {
++            return;
++        }
++        formController.jumpToIndex(target);
++        formEntryViewModel.refresh();
++    }
++
+     @NotNull
+     private ODKView createODKView(boolean advancingPage, FormEntryPrompt[] prompts, FormEntryCaption[] groups) {
+         odkViewLifecycle = new ControllableLifecyleOwner();
+@@ -1178,12 +1224,22 @@ public class FormFillingActivity extends LocalizedActivity implements CollectCom
+             updateNavigationButtonVisibility();
+         }
+ 
++        updateProgressIndicator(formController, null);
++
++        java.util.List<org.odk.collect.android.formentry.StageProgress.ReviewRow> review =
++                org.odk.collect.android.formentry.StageProgress.review(formController);
++
+         return new FormEndView(
+                 this,
+                 userVisibleInstanceName != null ? userVisibleInstanceName : saveName,
+                 formEntryViewModel.isFormEditableAfterFinalization(),
+                 formEndViewModel,
+-                markAsFinalized -> saveForm(true, markAsFinalized, saveName, false)
++                review != null ? review : java.util.Collections.emptyList(),
++                markAsFinalized -> saveForm(true, markAsFinalized, saveName, false),
++                goToIndex -> {
++                    jumpBackToStage(goToIndex);
++                    return kotlin.Unit.INSTANCE;
++                }
+         );
+     }
+ 
+diff --git a/collect_app/src/main/java/org/odk/collect/android/application/Collect.java b/collect_app/src/main/java/org/odk/collect/android/application/Collect.java
+index 78ba283..68a1ab2 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/application/Collect.java
++++ b/collect_app/src/main/java/org/odk/collect/android/application/Collect.java
+@@ -132,6 +132,7 @@ public class Collect extends Application implements
+     public void onCreate() {
+         super.onCreate();
+         singleton = this;
++        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO);
+ 
+         CrashHandler.install(this).launchApp(
+                 () -> ExternalFilesUtils.testExternalFilesAccess(this),
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/FormEnd.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/FormEnd.kt
+index 9575215..0371e87 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/formentry/FormEnd.kt
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/FormEnd.kt
+@@ -1,7 +1,24 @@
+ package org.odk.collect.android.formentry
+ 
+ import androidx.annotation.StringRes
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxHeight
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
++import androidx.compose.material.icons.filled.Check
++import androidx.compose.material.icons.filled.KeyboardArrowDown
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.text.font.FontWeight
++import org.javarosa.core.model.FormIndex
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxSize
+@@ -45,6 +62,8 @@ fun FormEnd(
+     shouldBeSentAutomatically: Boolean,
+     saveAsDraftEnabled: Boolean,
+     finalizeEnabled: Boolean,
++    review: List<StageProgress.ReviewRow> = emptyList(),
++    onGoTo: (FormIndex) -> Unit = {},
+     onSave: (Boolean) -> Unit = {}
+ ) {
+     Surface {
+@@ -59,6 +78,10 @@ fun FormEnd(
+                 style = MaterialTheme.typography.titleLarge
+             )
+ 
++            if (review.isNotEmpty()) {
++                ReviewList(review, onGoTo)
++            }
++
+             if (finalizeEnabled) {
+                 val (icon, title, message) = getWarning(
+                     isEditableAfterFinalization,
+@@ -138,6 +161,102 @@ fun FormEnd(
+     }
+ }
+ 
++@Composable
++private fun ReviewList(review: List<StageProgress.ReviewRow>, onGoTo: (FormIndex) -> Unit) {
++    var expanded by remember { mutableStateOf(setOf<Int>()) }
++    val ok = Color(0xFF2E7D32)
++    val bad = Color(0xFFB3261E)
++
++    Column(
++        modifier = Modifier.padding(top = marginStandard()),
++        verticalArrangement = Arrangement.spacedBy(marginSmall())
++    ) {
++        review.forEachIndexed { i, row ->
++            val complete = row.answered >= row.total
++            val color = if (complete) ok else bad
++            val fraction = if (row.total <= 0) 1f else (row.answered.toFloat() / row.total).coerceIn(0f, 1f)
++            val open = i in expanded
++
++            Card(
++                modifier = Modifier
++                    .fillMaxWidth()
++                    .then(
++                        if (complete) Modifier else Modifier.clickable {
++                            expanded = if (open) expanded - i else expanded + i
++                        }
++                    )
++            ) {
++                Column(modifier = Modifier.padding(marginStandard())) {
++                    Row(
++                        modifier = Modifier.fillMaxWidth(),
++                        verticalAlignment = Alignment.CenterVertically,
++                        horizontalArrangement = Arrangement.SpaceBetween
++                    ) {
++                        Text(
++                            text = row.label,
++                            style = MaterialTheme.typography.titleMedium,
++                            modifier = Modifier.weight(1f)
++                        )
++                        Text(
++                            text = "${row.answered}/${row.total}",
++                            color = color,
++                            fontWeight = FontWeight.Bold
++                        )
++                        Icon(
++                            imageVector = when {
++                                complete -> Icons.Default.Check
++                                open -> Icons.Default.KeyboardArrowDown
++                                else -> Icons.AutoMirrored.Filled.KeyboardArrowRight
++                            },
++                            tint = color,
++                            contentDescription = null,
++                            modifier = Modifier.padding(start = marginExtraSmall())
++                        )
++                    }
++
++                    Box(
++                        modifier = Modifier
++                            .padding(top = marginExtraSmall())
++                            .fillMaxWidth()
++                            .height(5.dp)
++                            .clip(RoundedCornerShape(3.dp))
++                            .background(Color(0x332E7D32))
++                    ) {
++                        Box(
++                            modifier = Modifier
++                                .fillMaxWidth(fraction)
++                                .fillMaxHeight()
++                                .background(color)
++                        )
++                    }
++
++                    if (open) {
++                        row.missing.forEach { missing ->
++                            Row(
++                                modifier = Modifier
++                                    .padding(top = marginSmall())
++                                    .fillMaxWidth()
++                                    .clip(RoundedCornerShape(10.dp))
++                                    .background(Color(0x1AB3261E))
++                                    .clickable { onGoTo(missing.index) }
++                                    .padding(marginSmall()),
++                                verticalAlignment = Alignment.CenterVertically
++                            ) {
++                                Text(
++                                    text = missing.text,
++                                    modifier = Modifier.weight(1f),
++                                    style = MaterialTheme.typography.bodyMedium
++                                )
++                                Text(text = "Go ›", color = bad, fontWeight = FontWeight.Bold)
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
+ @Composable
+ private fun EditWarning(
+     icon: ImageVector,
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/FormEndView.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/FormEndView.kt
+index d52a69a..ffc2ef9 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/formentry/FormEndView.kt
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/FormEndView.kt
+@@ -12,7 +12,9 @@ class FormEndView(
+     formTitle: String,
+     isFormEditableAfterFinalization: Boolean,
+     formEndViewModel: FormEndViewModel,
+-    private val listener: Listener
++    review: List<StageProgress.ReviewRow>,
++    private val listener: Listener,
++    onGoTo: (org.javarosa.core.model.FormIndex) -> Unit
+ ) : SwipeHandler.View(context) {
+ 
+     private val binding = FormEntryEndBinding.inflate(LayoutInflater.from(context), this, true)
+@@ -25,6 +27,8 @@ class FormEndView(
+                 shouldBeSentAutomatically = formEndViewModel.shouldFormBeSentAutomatically(),
+                 saveAsDraftEnabled = formEndViewModel.isSaveDraftEnabled(),
+                 finalizeEnabled = formEndViewModel.isFinalizeEnabled(),
++                review = review,
++                onGoTo = onGoTo,
+                 onSave = { listener.onSaveClicked(it) }
+             )
+         }
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java b/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java
+index 5baca83..e540aeb 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/ODKView.java
+@@ -201,6 +201,9 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+ 
+         layout = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                 LinearLayout.LayoutParams.WRAP_CONTENT);
++        // each question sits in its own rounded tile
++        float tileDensity = context.getResources().getDisplayMetrics().density;
++        layout.setMargins((int) (12 * tileDensity), (int) (6 * tileDensity), (int) (12 * tileDensity), (int) (6 * tileDensity));
+         // display which group you are in as well as the question
+         setGroupText(groups);
+ 
+@@ -384,6 +387,7 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+         QuestionWidget qw = widgetFactory.createWidgetFromPrompt(question, permissionsProvider, forceReadOnly);
+         qw.setOnLongClickListener(this);
+         qw.setValueChangedListener(this);
++        qw.setBackgroundResource(R.drawable.question_tile);
+ 
+         return qw;
+     }
+@@ -400,6 +404,8 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+         int marginVertical = (int) getContext().getResources().getDimension(org.odk.collect.androidshared.R.dimen.margin_extra_small);
+         params.setMargins(0, marginVertical, 0, marginVertical);
+         divider.setLayoutParams(params);
++        // tiles replace the divider lines
++        divider.setVisibility(View.GONE);
+ 
+         return divider;
+     }
+@@ -425,17 +431,7 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+      * Add a TextView containing the hierarchy of groups to which the question belongs.
+      */
+     private void setGroupText(FormEntryCaption[] groups) {
+-        CharSequence path = getGroupsPath(groups);
+-
+-        if (path.length() > 0) {
+-            TextView tv = findViewById(R.id.group_text);
+-            tv.setText(path);
+-
+-            int fontSize = QuestionFontSizeUtils.getFontSize(settingsProvider.getUnprotectedSettings(), QuestionFontSizeUtils.FontSize.SUBTITLE_1);
+-            tv.setTextSize(TypedValue.COMPLEX_UNIT_DIP, fontSize);
+-
+-            tv.setVisibility(VISIBLE);
+-        }
++        // The "Survey > Section > ..." path is hidden; the stage header shows where we are.
+     }
+ 
+     /**
+@@ -701,6 +697,14 @@ public class ODKView extends SwipeHandler.View implements OnLongClickListener, W
+         return widgets;
+     }
+ 
++    /**
++     * Adds a custom view (for example a table) to the end of this screen.
++     */
++    public void addExtraView(View view) {
++        widgetsList.addView(view, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
++    }
++
+     @Override
+     public void setOnFocusChangeListener(OnFocusChangeListener l) {
+         for (int i = 0; i < widgets.size(); i++) {
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/RosterTable.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/RosterTable.kt
+new file mode 100644
+index 0000000..4f5b0a3
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/RosterTable.kt
+@@ -0,0 +1,244 @@
++package org.odk.collect.android.formentry
++
++import android.content.Context
++import android.graphics.Typeface
++import android.view.Gravity
++import android.view.View
++import android.view.ViewGroup
++import android.widget.LinearLayout
++import android.widget.TableLayout
++import android.widget.TableRow
++import android.widget.TextView
++import com.google.android.material.color.MaterialColors
++import org.javarosa.core.model.instance.TreeElement
++import org.odk.collect.android.javarosawrapper.FormController
++
++/**
++ * Shows the family list screen of the community survey as a real table
++ * (Name | Age | Services) instead of the text list built by the form.
++ *
++ * It only acts on the screen whose group is called "roster_summary_group" below, so every other
++ * form and every other screen is untouched. If anything goes wrong or no members are found,
++ * nothing changes and the form's own text list stays visible.
++ */
++object RosterTable {
++    private const val GROUP_NAME = "roster_summary_grp"
++    private const val NOTE_NAME = "roster_summary_note"
++    private const val REPEAT_NAME = "family_members"
++
++    private data class Person(
++        val name: String,
++        val relation: String,
++        val age: String,
++        val gender: String,
++        val services: String
++    )
++
++    @JvmStatic
++    fun addTo(odkView: ODKView, formController: FormController) {
++        try {
++            val reference = formController.getFormIndex().reference
++            if (reference?.nameLast != GROUP_NAME) {
++                return
++            }
++
++            val root = formController.getFormDef()?.mainInstance?.root ?: return
++            val people = readPeople(root)
++            if (people.isEmpty()) {
++                return
++            }
++
++            // Hide the form's own text list; the table replaces it.
++            for (widget in odkView.widgets) {
++                if (widget.formEntryPrompt.index.reference.nameLast == NOTE_NAME) {
++                    widget.visibility = View.GONE
++                }
++            }
++
++            val language = formController.getLanguage().orEmpty()
++            val malayalam = language.contains("Malayalam", ignoreCase = true) || language == "ml"
++            odkView.addExtraView(buildView(odkView.context, people, malayalam))
++        } catch (e: RuntimeException) {
++            // Never let the table break the form: fall back to the text list.
++        }
++    }
++
++    /** The member names entered so far, in order (blank if not entered yet). */
++    @JvmStatic
++    fun memberNames(formController: FormController): List<String> {
++        return try {
++            val root = formController.getFormDef()?.mainInstance?.root ?: return emptyList()
++            readPeople(root).map { it.name }
++        } catch (e: RuntimeException) {
++            emptyList()
++        }
++    }
++
++    private fun readPeople(root: TreeElement): List<Person> {
++        val instances = mutableListOf<TreeElement>()
++        findRepeats(root, instances)
++        return instances.map { member ->
++            val name = textOf(findChild(member, "member_name"))
++            val age = textOf(findChild(member, "member_age"))
++            val overview = textOf(findChild(member, "health_overview"))
++            val relation = textOf(findChild(member, "member_relation_to_head"))
++            val gender = genderLetter(textOf(findChild(member, "member_gender")))
++            Person(name, relation, age, gender, services(overview, age.toIntOrNull()))
++        }
++    }
++
++    private fun findRepeats(element: TreeElement, out: MutableList<TreeElement>) {
++        for (i in 0 until element.numChildren) {
++            val child = element.getChildAt(i)
++            if (child.name == REPEAT_NAME) {
++                if (child.multiplicity >= 0) {
++                    out.add(child)
++                }
++            } else {
++                findRepeats(child, out)
++            }
++        }
++    }
++
++    private fun findChild(element: TreeElement, name: String): TreeElement? {
++        for (i in 0 until element.numChildren) {
++            val child = element.getChildAt(i)
++            if (child.name == name) {
++                return child
++            }
++            val deeper = findChild(child, name)
++            if (deeper != null) {
++                return deeper
++            }
++        }
++        return null
++    }
++
++    private fun textOf(element: TreeElement?): String {
++        return element?.value?.displayText?.trim() ?: ""
++    }
++
++    private fun genderLetter(value: String): String = when (value) {
++        "male" -> "M"
++        "female" -> "F"
++        "transgender" -> "T"
++        else -> "-"
++    }
++
++    private fun services(overview: String, age: Int?): String {
++        val chosen = overview.split(Regex("[,\\s]+")).filter { it.isNotEmpty() }
++        val labels = mutableListOf<String>()
++        if ("ncd" in chosen && (age == null || age >= 18)) labels.add("NCD")
++        if ("disability" in chosen) labels.add("Disability")
++        if ("mental_health" in chosen) labels.add("Mental health")
++        if ("palliative" in chosen) labels.add("Palliative")
++        if (age != null && age >= 60) labels.add("Geriatric")
++        return if (labels.isEmpty()) "-" else labels.joinToString(", ")
++    }
++
++    private fun buildView(context: Context, people: List<Person>, malayalam: Boolean): View {
++        val density = context.resources.displayMetrics.density
++        fun dp(value: Int) = (value * density).toInt()
++
++        val textColor = MaterialColors.getColor(context, com.google.android.material.R.attr.colorOnSurface, 0xFF000000.toInt())
++        val headerBackground = MaterialColors.getColor(context, com.google.android.material.R.attr.colorSurfaceVariant, 0xFFE0E0E0.toInt())
++        val lineColor = MaterialColors.getColor(context, com.google.android.material.R.attr.colorOutlineVariant, 0xFFBDBDBD.toInt())
++
++        val headers = if (malayalam) {
++            listOf("പേര് · ബന്ധം", "വയസ്സ് · ലിംഗം", "സേവനങ്ങൾ")
++        } else {
++            listOf("Name · Relation", "Age · Sex", "Services")
++        }
++        val intro = if (malayalam) {
++            "കുടുംബാംഗങ്ങളുടെ പട്ടിക പരിശോധിക്കുക. എന്തെങ്കിലും തെറ്റുണ്ടെങ്കിൽ തിരികെ പോകുക."
++        } else {
++            "Please check the family list. Go back if anything is wrong."
++        }
++        val weights = floatArrayOf(2.2f, 1.2f, 2.4f)
++
++        fun cell(text: String, column: Int, bold: Boolean, background: Int?): TextView {
++            return TextView(context).apply {
++                this.text = text
++                setTextColor(textColor)
++                textSize = 15f
++                if (bold) setTypeface(typeface, Typeface.BOLD)
++                gravity = Gravity.CENTER_VERTICAL
++                setPadding(dp(10), dp(12), dp(10), dp(12))
++                if (background != null) setBackgroundColor(background)
++                layoutParams = TableRow.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weights[column])
++            }
++        }
++
++        fun nameCell(person: Person): View {
++            return LinearLayout(context).apply {
++                orientation = LinearLayout.VERTICAL
++                setPadding(dp(10), dp(10), dp(10), dp(10))
++                layoutParams = TableRow.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weights[0])
++                addView(TextView(context).apply {
++                    text = person.name
++                    setTextColor(textColor)
++                    textSize = 15f
++                    setTypeface(typeface, Typeface.BOLD)
++                })
++                if (person.relation.isNotEmpty()) {
++                    addView(TextView(context).apply {
++                        text = person.relation
++                        setTextColor(textColor)
++                        alpha = 0.7f
++                        textSize = 12f
++                    })
++                }
++            }
++        }
++
++        fun personRow(person: Person): TableRow {
++            return TableRow(context).apply {
++                layoutParams = TableLayout.LayoutParams(
++                    ViewGroup.LayoutParams.MATCH_PARENT,
++                    ViewGroup.LayoutParams.WRAP_CONTENT
++                )
++                gravity = Gravity.CENTER_VERTICAL
++                addView(nameCell(person))
++                addView(cell("${person.age} · ${person.gender}", 1, false, null))
++                addView(cell(person.services, 2, false, null))
++            }
++        }
++
++        fun row(values: List<String>, bold: Boolean, background: Int?): TableRow {
++            return TableRow(context).apply {
++                layoutParams = TableLayout.LayoutParams(
++                    ViewGroup.LayoutParams.MATCH_PARENT,
++                    ViewGroup.LayoutParams.WRAP_CONTENT
++                )
++                values.forEachIndexed { column, value -> addView(cell(value, column, bold, background)) }
++            }
++        }
++
++        fun divider(): View {
++            return View(context).apply {
++                setBackgroundColor(lineColor)
++                layoutParams = TableLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
++            }
++        }
++
++        val table = TableLayout(context).apply {
++            addView(row(headers, true, headerBackground))
++            people.forEach { person ->
++                addView(personRow(person))
++                addView(divider())
++            }
++        }
++
++        return LinearLayout(context).apply {
++            orientation = LinearLayout.VERTICAL
++            setPadding(dp(16), dp(8), dp(16), dp(16))
++            addView(TextView(context).apply {
++                text = intro
++                setTextColor(textColor)
++                textSize = 16f
++                setPadding(0, 0, 0, dp(12))
++            })
++            addView(table)
++        }
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/ScreenStyle.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/ScreenStyle.kt
+new file mode 100644
+index 0000000..96a088f
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/ScreenStyle.kt
+@@ -0,0 +1,43 @@
++package org.odk.collect.android.formentry
++
++import android.view.Gravity
++import android.view.View
++import android.view.ViewGroup
++import android.widget.TextView
++
++/** Small look-and-feel touches for the community survey screens. */
++object ScreenStyle {
++    /**
++     * Centres the person's name tile (the notes whose names start with "who_") at the top of
++     * each member screen. Any other screen or form is left alone.
++     */
++    @JvmStatic
++    fun centerMemberName(odkView: ODKView) {
++        try {
++            for (widget in odkView.widgets) {
++                val name = widget.formEntryPrompt.index.reference.nameLast ?: continue
++                if (name.startsWith("who_")) {
++                    centerAllText(widget)
++                }
++            }
++        } catch (e: RuntimeException) {
++            // purely cosmetic: ignore
++        }
++    }
++
++    private fun centerAllText(view: View) {
++        if (view is TextView) {
++            view.gravity = Gravity.CENTER_HORIZONTAL
++            view.textAlignment = View.TEXT_ALIGNMENT_CENTER
++            val params = view.layoutParams
++            if (params != null && params.width != ViewGroup.LayoutParams.MATCH_PARENT) {
++                params.width = ViewGroup.LayoutParams.MATCH_PARENT
++                view.layoutParams = params
++            }
++        } else if (view is ViewGroup) {
++            for (i in 0 until view.childCount) {
++                centerAllText(view.getChildAt(i))
++            }
++        }
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/StageHeader.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/StageHeader.kt
+new file mode 100644
+index 0000000..02dc60b
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/StageHeader.kt
+@@ -0,0 +1,176 @@
++package org.odk.collect.android.formentry
++
++import android.content.Context
++import android.graphics.Color
++import android.graphics.Typeface
++import android.graphics.drawable.GradientDrawable
++import android.view.Gravity
++import android.view.View
++import android.widget.FrameLayout
++import android.widget.LinearLayout
++import android.widget.TextView
++import org.javarosa.core.model.FormIndex
++
++/**
++ * Draws the stage header at the top of the form screen: title and "Stage n of N", a row of
++ * equal-width segments (the current one filled in proportion to progress through that stage),
++ * and a row with "Previous: <stage>" (tappable), the current stage, and a dimmed "Next: <stage>".
++ * There is deliberately no way to go forward from here.
++ */
++object StageHeader {
++    private val INK = Color.parseColor("#123D1A")
++    private val MUTED = Color.parseColor("#2E6B35")
++    private val DEEP = Color.parseColor("#2E7D32")
++    private val PRIMARY = Color.parseColor("#E8F5E9")
++    private val SECONDARY = Color.parseColor("#A5D6A7")
++
++    @JvmStatic
++    fun render(holder: LinearLayout, title: String, state: StageProgress.State, onPrevious: (FormIndex) -> Unit) {
++        val context = holder.context
++        val density = context.resources.displayMetrics.density
++        fun dp(v: Int) = (v * density).toInt()
++
++        holder.removeAllViews()
++        holder.orientation = LinearLayout.VERTICAL
++        holder.setPadding(dp(20), dp(10), dp(20), dp(16))
++        holder.background = GradientDrawable().apply {
++            setColor(SECONDARY)
++            val r = dp(28).toFloat()
++            cornerRadii = floatArrayOf(0f, 0f, 0f, 0f, r, r, r, r)
++        }
++
++        val stages = state.stages
++        val index = state.current
++
++        // Row 1: title and "Stage n of N"
++        holder.addView(LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER_VERTICAL
++            addView(text(context, title, 15f, INK, true).apply {
++                maxLines = 1
++                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
++            })
++            addView(text(context, "Stage ${index + 1} of ${stages.size}", 13f, INK, true))
++        })
++
++        // Row 2: equal segments
++        holder.addView(LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            layoutParams = LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, dp(10)
++            ).apply { topMargin = dp(12) }
++            stages.forEachIndexed { i, stage ->
++                val fraction = when {
++                    i < index -> 1f
++                    i == index -> stage.fraction
++                    else -> 0f
++                }
++                addView(segment(context, fraction, dp(5)).apply {
++                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
++                        if (i > 0) marginStart = dp(4)
++                    }
++                })
++            }
++        })
++
++        // Row 3: previous / current / next
++        holder.addView(LinearLayout(context).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER_VERTICAL
++            layoutParams = LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
++            ).apply { topMargin = dp(12) }
++
++            val previous = stages.getOrNull(index - 1)
++            val next = stages.getOrNull(index + 1)
++
++            addView(pill(context, if (previous != null) "‹ Previous\n${previous.label}" else "", 11f, INK, false).apply {
++                layoutParams = LinearLayout.LayoutParams(0, dp(38), 1.3f)
++                if (previous == null) {
++                    visibility = View.INVISIBLE
++                } else {
++                    background = outline(dp(19).toFloat(), INK, dp(1) + 1, false, density)
++                    val target = previous.first
++                    if (target != null) {
++                        setOnClickListener { onPrevious(target) }
++                    } else {
++                        alpha = 0.5f
++                    }
++                }
++            })
++            addView(pill(context, stages[index].label, 15f, INK, true).apply {
++                layoutParams = LinearLayout.LayoutParams(0, dp(38), 0.9f).apply {
++                    marginStart = dp(6)
++                    marginEnd = dp(6)
++                }
++                background = GradientDrawable().apply {
++                    setColor(PRIMARY)
++                    cornerRadius = dp(19).toFloat()
++                }
++            })
++            addView(pill(context, if (next != null) "Next ›\n${next.label}" else "", 11f, MUTED, false).apply {
++                layoutParams = LinearLayout.LayoutParams(0, dp(38), 1.3f)
++                gravity = Gravity.CENTER_VERTICAL or Gravity.END
++                if (next == null) {
++                    visibility = View.INVISIBLE
++                } else {
++                    background = outline(dp(19).toFloat(), MUTED, dp(1) + 1, true, density)
++                    isClickable = false
++                }
++            })
++        })
++    }
++
++    private fun text(context: Context, value: String, size: Float, color: Int, bold: Boolean): TextView {
++        return TextView(context).apply {
++            text = value
++            textSize = size
++            setTextColor(color)
++            if (bold) setTypeface(typeface, Typeface.BOLD)
++        }
++    }
++
++    private fun pill(context: Context, value: String, size: Float, color: Int, bold: Boolean): TextView {
++        val density = context.resources.displayMetrics.density
++        return text(context, value, size, color, bold).apply {
++            gravity = Gravity.CENTER
++            maxLines = 2
++            ellipsize = android.text.TextUtils.TruncateAt.END
++            setPadding((10 * density).toInt(), 0, (10 * density).toInt(), 0)
++        }
++    }
++
++    private fun outline(radius: Float, color: Int, widthPx: Int, dashed: Boolean, density: Float): GradientDrawable {
++        return GradientDrawable().apply {
++            cornerRadius = radius
++            setColor(Color.TRANSPARENT)
++            if (dashed) setStroke(widthPx, color, 6f * density, 4f * density) else setStroke(widthPx, color)
++        }
++    }
++
++    private fun segment(context: Context, fraction: Float, radiusPx: Int): View {
++        val track = FrameLayout(context)
++        track.background = GradientDrawable().apply {
++            setColor(PRIMARY)
++            cornerRadius = radiusPx.toFloat()
++        }
++        track.clipToOutline = true
++        track.addView(View(context).apply {
++            background = GradientDrawable().apply {
++                setColor(DEEP)
++                cornerRadius = radiusPx.toFloat()
++            }
++            // Width is set once the segment has been measured.
++            visibility = if (fraction <= 0f) View.GONE else View.VISIBLE
++        }, FrameLayout.LayoutParams(0, FrameLayout.LayoutParams.MATCH_PARENT))
++        track.addOnLayoutChangeListener { v, left, _, right, _, _, _, _, _ ->
++            val fill = (v as FrameLayout).getChildAt(0)
++            val width = ((right - left) * fraction).toInt()
++            if (fill.layoutParams.width != width) {
++                fill.layoutParams.width = width
++                fill.requestLayout()
++            }
++        }
++        return track
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/formentry/StageProgress.kt b/collect_app/src/main/java/org/odk/collect/android/formentry/StageProgress.kt
+new file mode 100644
+index 0000000..516f1ef
+--- /dev/null
++++ b/collect_app/src/main/java/org/odk/collect/android/formentry/StageProgress.kt
+@@ -0,0 +1,208 @@
++package org.odk.collect.android.formentry
++
++import org.javarosa.core.model.FormIndex
++import org.javarosa.form.api.FormEntryController
++import org.odk.collect.android.exception.JavaRosaException
++import org.odk.collect.android.javarosawrapper.FormController
++
++/**
++ * Works out which "stage" of the community survey the user is in, and how far through that stage.
++ *
++ * Stages, in order: Intro, Household details 1, one stage per family member (labelled with the
++ * name entered so far), Household details 2, Remarks.
++ *
++ * Which stage a screen belongs to is decided from the names of the groups it sits in (the same
++ * names as in the XLSForm). The form is walked from the start the same way the Next button does,
++ * so screens that are skipped (not relevant) are not counted. The current position is always put
++ * back before returning.
++ */
++object StageProgress {
++    data class Stage(
++        val label: String,
++        /** First screen of this stage, or null if the user has not reached it yet. */
++        val first: FormIndex?,
++        val total: Int,
++        /** Screens of this stage up to and including the current one (only for the current stage). */
++        val position: Int
++    ) {
++        val fraction: Float
++            get() = if (total <= 0) 0f else (position.toFloat() / total).coerceIn(0f, 1f)
++    }
++
++    data class State(val stages: List<Stage>, val current: Int, val atEnd: Boolean = false)
++
++    data class Missing(val text: String, val index: FormIndex)
++
++    /** One line of the end-of-form review: a stage or a person with how many questions are answered. */
++    data class ReviewRow(val label: String, val answered: Int, val total: Int, val missing: List<Missing>)
++
++    private const val INTRO = "intro"
++    private const val HH1 = "hh1"
++    private const val HH2 = "hh2"
++    private const val REMARKS = "remarks"
++    private const val MEMBER_PREFIX = "m"
++
++    private class Acc {
++        var first: FormIndex? = null
++        var total = 0
++        var position = 0
++    }
++
++    private fun keyFor(formController: FormController, previous: String): String {
++        val reference = formController.getFormIndex().reference ?: return previous
++        var drilldown = -1
++        var key = previous
++        for (i in 0 until reference.size()) {
++            when (reference.getName(i)) {
++                "member_drilldown" -> drilldown = maxOf(reference.getMultiplicity(i), 0)
++                "consent_grp", "respondent_grp", "basic_details" -> key = INTRO
++                "sec1_top", "family_members", "roster_summary_grp" -> key = HH1
++                "sec1b" -> key = HH2
++                "sec6" -> key = REMARKS
++            }
++        }
++        return if (drilldown >= 0) MEMBER_PREFIX + drilldown else key
++    }
++
++
++    /** Stage keys in display order, and their labels. */
++    private fun orderedKeys(seen: Set<String>, names: List<String>): Pair<List<String>, Map<String, String>> {
++        val memberCount = seen.count { it.startsWith(MEMBER_PREFIX) }
++        val keys = mutableListOf(INTRO, HH1)
++        val labels = mutableMapOf(
++            INTRO to "Intro", HH1 to "Household details 1",
++            HH2 to "Household details 2", REMARKS to "Remarks"
++        )
++        if (memberCount == 0) {
++            keys.add("m0")
++            labels["m0"] = "Members"
++        } else {
++            for (k in 0 until memberCount) {
++                keys.add(MEMBER_PREFIX + k)
++                labels[MEMBER_PREFIX + k] = names.getOrNull(k)?.takeIf { it.isNotBlank() } ?: "Member ${k + 1}"
++            }
++        }
++        keys.add(HH2)
++        keys.add(REMARKS)
++        return Pair(keys, labels)
++    }
++
++    private val SECTION_PREFIX = Regex("^\\s*Section \\d+ of \\d+:\\s*")
++
++    /** Text for the left side of the header: "<person> · <section>" (or just the section). */
++    @JvmStatic
++    fun headerTitle(state: State, sectionCaption: String?): String {
++        if (state.atEnd) return "Review before you submit"
++        val stage = state.stages.getOrNull(state.current)?.label ?: ""
++        val section = sectionCaption?.replace(SECTION_PREFIX, "")?.trim().orEmpty()
++        val isMember = state.current >= 2 && state.current < state.stages.size - 2
++        return when {
++            section.isEmpty() -> stage
++            isMember && !section.equals(stage, ignoreCase = true) -> "$stage · $section"
++            else -> section
++        }
++    }
++
++    /**
++     * For the end-of-form screen: every stage / person with how many of their relevant questions
++     * are answered, and which ones are not. Only questions that are currently relevant are
++     * counted; read-only notes are ignored.
++     */
++    @JvmStatic
++    fun review(formController: FormController): List<ReviewRow>? {
++        val original: FormIndex = formController.getFormIndex()
++        return try {
++            formController.jumpToIndex(FormIndex.createBeginningOfFormIndex())
++            val answered = LinkedHashMap<String, Int>()
++            val total = LinkedHashMap<String, Int>()
++            val missing = LinkedHashMap<String, MutableList<Missing>>()
++            var lastKey = INTRO
++            var event = formController.stepToNextEvent(true)
++            while (event != FormEntryController.EVENT_END_OF_FORM) {
++                if (event == FormEntryController.EVENT_QUESTION) {
++                    val prompt = formController.getQuestionPrompt()
++                    if (prompt != null && !prompt.isReadOnly) {
++                        val key = keyFor(formController, lastKey)
++                        lastKey = key
++                        total[key] = (total[key] ?: 0) + 1
++                        val value = prompt.answerValue?.displayText
++                        if (prompt.answerValue != null && !value.isNullOrBlank()) {
++                            answered[key] = (answered[key] ?: 0) + 1
++                        } else {
++                            val text = (prompt.questionText ?: prompt.longText ?: "").replace(Regex("<[^>]*>"), "").trim()
++                            missing.getOrPut(key) { mutableListOf() }.add(Missing(text, formController.getFormIndex()))
++                        }
++                    }
++                }
++                event = formController.stepToNextEvent(true)
++            }
++
++            val (keys, labels) = orderedKeys(total.keys, RosterTable.memberNames(formController))
++            keys.map { key ->
++                ReviewRow(labels.getValue(key), answered[key] ?: 0, total[key] ?: 0, missing[key] ?: emptyList())
++            }
++        } catch (e: JavaRosaException) {
++            null
++        } catch (e: RuntimeException) {
++            null
++        } finally {
++            formController.jumpToIndex(original)
++        }
++    }
++
++    @JvmStatic
++    fun calculate(formController: FormController): State? {
++        val original: FormIndex = formController.getFormIndex()
++        return try {
++            val originalEvent = formController.getEvent()
++            formController.jumpToIndex(FormIndex.createBeginningOfFormIndex())
++
++            val accs = LinkedHashMap<String, Acc>()
++            var lastKey = INTRO
++            var currentKey: String? = null
++            var event = formController.stepToNextScreenEvent()
++            while (event != FormEntryController.EVENT_END_OF_FORM) {
++                if (event == FormEntryController.EVENT_QUESTION ||
++                    event == FormEntryController.EVENT_GROUP ||
++                    event == FormEntryController.EVENT_REPEAT
++                ) {
++                    val key = keyFor(formController, lastKey)
++                    lastKey = key
++                    val acc = accs.getOrPut(key) { Acc() }
++                    if (acc.first == null) acc.first = formController.getFormIndex()
++                    acc.total++
++                    if (currentKey == null && formController.getFormIndex() == original) {
++                        currentKey = key
++                        acc.position = acc.total
++                    }
++                }
++                event = formController.stepToNextScreenEvent()
++            }
++
++            if (originalEvent == FormEntryController.EVENT_END_OF_FORM) {
++                currentKey = lastKey
++                accs[lastKey]?.let { it.position = it.total }
++            }
++
++            val (keys, labels) = orderedKeys(accs.keys, RosterTable.memberNames(formController))
++
++            val stages = keys.map { key ->
++                val acc = accs[key]
++                // Stages before the current one are complete; later ones are empty.
++                Stage(labels.getValue(key), acc?.first, acc?.total ?: 0, acc?.position ?: 0)
++            }
++            val current = keys.indexOf(currentKey ?: INTRO).coerceAtLeast(0)
++            // Earlier stages count as fully done.
++            val adjusted = stages.mapIndexed { i, s ->
++                if (i < current) s.copy(position = s.total) else s
++            }
++            State(adjusted, current, originalEvent == FormEntryController.EVENT_END_OF_FORM)
++        } catch (e: JavaRosaException) {
++            null
++        } catch (e: RuntimeException) {
++            null
++        } finally {
++            formController.jumpToIndex(original)
++        }
++    }
++}
+diff --git a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt
+index 2c3a0da..154c16a 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt
++++ b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuActivity.kt
+@@ -2,7 +2,7 @@ package org.odk.collect.android.mainmenu
+ 
+ import android.os.Build
+ import android.os.Bundle
+-import androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
++import androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+ import androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode
+ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+ import androidx.lifecycle.ViewModelProvider
+@@ -73,7 +73,7 @@ class MainMenuActivity : LocalizedActivity(), CollectComposeThemeProvider {
+         val viewModelProvider = ViewModelProvider(this, viewModelFactory)
+         currentProjectViewModel = viewModelProvider[CurrentProjectViewModel::class.java]
+ 
+-        setDefaultNightMode(MODE_NIGHT_FOLLOW_SYSTEM)
++        setDefaultNightMode(MODE_NIGHT_NO)
+ 
+         if (!currentProjectViewModel.hasCurrentProject()) {
+             super.onCreate(null)
+diff --git a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt
+index a8db476..1dd58e9 100644
+--- a/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt
++++ b/collect_app/src/main/java/org/odk/collect/android/mainmenu/MainMenuViewModel.kt
+@@ -56,9 +56,6 @@ class MainMenuViewModel(
+                 commitDescription =
+                     appendToCommitDescription(commitDescription, versionInformation.commitSHA!!)
+             }
+-            if (versionInformation.isDirty) {
+-                commitDescription = appendToCommitDescription(commitDescription, "dirty")
+-            }
+             return if (commitDescription.isNotEmpty()) {
+                 commitDescription
+             } else {
+diff --git a/collect_app/src/main/res/drawable/question_tile.xml b/collect_app/src/main/res/drawable/question_tile.xml
+new file mode 100644
+index 0000000..4881fa4
+--- /dev/null
++++ b/collect_app/src/main/res/drawable/question_tile.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <solid android:color="#FFFFFF" />
++    <stroke android:width="1dp" android:color="#DCEBDD" />
++    <corners android:radius="18dp" />
++</shape>
+diff --git a/collect_app/src/main/res/layout/form_entry.xml b/collect_app/src/main/res/layout/form_entry.xml
+index 5c8e38c..cee247d 100644
+--- a/collect_app/src/main/res/layout/form_entry.xml
++++ b/collect_app/src/main/res/layout/form_entry.xml
+@@ -22,13 +22,22 @@
+             app:layout_constraintEnd_toEndOf="parent"
+             app:layout_constraintTop_toTopOf="parent"/>
+ 
++        <LinearLayout
++            android:id="@+id/form_progress_holder"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:orientation="vertical"
++            app:layout_constraintStart_toStartOf="parent"
++            app:layout_constraintEnd_toEndOf="parent"
++            app:layout_constraintTop_toBottomOf="@id/audio_recording_controller" />
++
+         <FrameLayout
+             android:id="@+id/questionholder"
+             android:layout_width="0dp"
+             android:layout_height="0dp"
+             app:layout_constraintStart_toStartOf="parent"
+             app:layout_constraintEnd_toEndOf="parent"
+-            app:layout_constraintTop_toBottomOf="@id/audio_recording_controller"
++            app:layout_constraintTop_toBottomOf="@id/form_progress_holder"
+             app:layout_constraintBottom_toTopOf="@id/buttonholder"/>
+ 
+         <org.odk.collect.android.views.TransparentProgressScreen
+diff --git a/collect_app/src/main/res/values/colors.xml b/collect_app/src/main/res/values/colors.xml
+index caf43cb..0c96064 100644
+--- a/collect_app/src/main/res/values/colors.xml
++++ b/collect_app/src/main/res/values/colors.xml
+@@ -1,17 +1,17 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <color name="colorPrimaryLight">#3e9fcc</color>
++    <color name="colorPrimaryLight">#2E7D32</color>
+     <color name="colorOnPrimaryLight">#ffffff</color>
+-    <color name="colorPrimaryContainerLight">#bfe9ff</color>
+-    <color name="colorOnPrimaryContainerLight">#001f2a</color>
+-    <color name="colorSurfaceLight">#ffffff</color>
+-    <color name="colorOnSurfaceLight">#001f2a</color>
+-    <color name="colorSurfaceContainerHighestLight">#f2f2f2</color>
++    <color name="colorPrimaryContainerLight">#A5D6A7</color>
++    <color name="colorOnPrimaryContainerLight">#123D1A</color>
++    <color name="colorSurfaceLight">#E8F5E9</color>
++    <color name="colorOnSurfaceLight">#123D1A</color>
++    <color name="colorSurfaceContainerHighestLight">#DCEBDD</color>
+ 
+     <color name="colorPrimaryDark">#4cbcf0</color>
+     <color name="colorOnPrimaryDark">#003547</color>
+     <color name="colorPrimaryContainerDark">#004d65</color>
+-    <color name="colorOnPrimaryContainerDark">#bfe9ff</color>
++    <color name="colorOnPrimaryContainerDark">#A5D6A7</color>
+     <color name="colorSurfaceDark">#001117</color>
+     <color name="colorOnSurfaceDark">#d3e5ef</color>
+     <color name="colorSurfaceContainerHighestDark">#162f3b</color>
+diff --git a/collect_app/src/main/res/values/material_colors.xml b/collect_app/src/main/res/values/material_colors.xml
+index 05931ec..6809d4b 100644
+--- a/collect_app/src/main/res/values/material_colors.xml
++++ b/collect_app/src/main/res/values/material_colors.xml
+@@ -4,22 +4,22 @@
+     <color name="colorOnPrimary">@color/colorOnPrimaryLight</color>
+     <color name="colorPrimaryContainer">@color/colorPrimaryContainerLight</color>
+     <color name="colorOnPrimaryContainer">@color/colorOnPrimaryContainerLight</color>
+-    <color name="colorPrimaryInverse">#6dd2ff</color>
++    <color name="colorPrimaryInverse">#66BB6A</color>
+ 
+     <color name="colorError">#ba1a1a</color>
+     <!-- <color name="colorOnError">#ffffff</color> -->
+ 
+     <color name="colorSurface">@color/colorSurfaceLight</color>
+-    <color name="colorSurfaceVariant">#dce3e9</color>
++    <color name="colorSurfaceVariant">#CFE6D1</color>
+     <color name="colorOnSurface">@color/colorOnSurfaceLight</color>
+-    <color name="colorOnSurfaceVariant">#40484c</color>
++    <color name="colorOnSurfaceVariant">#2E6B35</color>
+     <color name="colorSurfaceContainerLowest">#ffffff</color>
+-    <color name="colorSurfaceContainerLow">#f7f7f7</color>
+-    <color name="colorSurfaceContainer">#f7f7f7</color>
+-    <color name="colorSurfaceContainerHigh">#f7f7f7</color>
++    <color name="colorSurfaceContainerLow">#F4FAF4</color>
++    <color name="colorSurfaceContainer">#F4FAF4</color>
++    <color name="colorSurfaceContainerHigh">#F4FAF4</color>
+     <color name="colorSurfaceContainerHighest">@color/colorSurfaceContainerHighestLight</color>
+-    <color name="colorSurfaceInverse">#003547</color>
+-    <color name="colorOnSurfaceInverse">#E1F4FF</color>
++    <color name="colorSurfaceInverse">#123D1A</color>
++    <color name="colorOnSurfaceInverse">#E8F5E9</color>
+ 
+     <bool name="lightStatusBar">true</bool>
+ </resources>
+diff --git a/strings/src/main/res/values/strings.xml b/strings/src/main/res/values/strings.xml
+index c0e1fbe..9f846d6 100644
+--- a/strings/src/main/res/values/strings.xml
++++ b/strings/src/main/res/values/strings.xml
+@@ -149,15 +149,15 @@
+     <!-- Title of the end of form screen -->
+     <string name="save_enter_data_description">You are at the end of %s.</string>
+     <!-- Text shown in an information box on the end of form screen when auto-send is off or the device is offline -->
+-    <string name="form_editing_disabled_after_finalizing">Can\'t edit after finalize</string>
++    <string name="form_editing_disabled_after_finalizing">Can\'t edit after submit</string>
+     <!-- Text shown in an information box on the end of form screen when auto-send is on and the device is online -->
+-    <string name="form_editing_disabled_after_sending">Can\'t edit after send</string>
++    <string name="form_editing_disabled_after_sending">Can\'t edit after submit</string>
+     <!-- Text shown in an information box on the end of form screen when auto-send is off and the form allows edits after finalize/send -->
+     <string name="form_editing_enabled_after_finalizing">Can edit after finalize</string>
+     <!-- Text shown in an information box on the end of form screen when auto-send is on and the form allows edits after finalize/send -->
+     <string name="form_editing_enabled_after_sending">Can edit after send</string>
+     <!-- Details shown in an information box on the end of form screen when the form does not allow edits after finalize/send -->
+-    <string name="form_editing_disabled_hint">If you need to make edits to your form, \"Save as draft\" until you\'re ready to send.</string>
++    <string name="form_editing_disabled_hint">If you need to make edits to your form, \"Save as draft\" until you\'re ready to submit.</string>
+     <!-- Details shown in an information box on the end of form screen when the form allows edits after finalization -->
+     <string name="form_editing_enabled_after_finalizing_hint">To make changes after finalizing your form, go to \"Ready to send\", open the form, and tap the edit icon.</string>
+     <!-- Details shown in an information box on the end of form screen when the form allows edits after sending -->
+@@ -165,9 +165,9 @@
+     <!-- Button text for saving as draft -->
+     <string name="save_as_draft">Save as draft</string>
+     <!-- Button text for finalizing a submission. Displayed instead of "Send" when auto-send is off or the device is offline -->
+-    <string name="finalize">Finalize</string>
++    <string name="finalize">Submit</string>
+     <!-- Button text for sending a submission. -->
+-    <string name="send">Send</string>
++    <string name="send">Submit</string>
+ 
+     <string name="data_saved_error">Sorry, form save failed!</string>
+     <string name="data_saved_ok">Form successfully saved!</string>
